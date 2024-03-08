@@ -1,0 +1,218 @@
+---
+title: "Gene Copy Number Analysis"
+author: "Youngmin Choi"
+date: "2023-10-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages(library(circlize))
+library(rmarkdown)
+
+```
+
+## I. Objective/Goal
+- To analyze patient data from HCC dataset to compare copy number data between patients that had vascular invasion and patients that have not.
+- To understand possible relevance between vascular invasion and affected cytoband in liver cancer patients. 
+
+## II. Analysis Steps
+
+### Step 0 - Check Clinical and Molecular Data
+-  Clinical data ("HCC_toffanin_Clinical_Cleaned_Final.csv")  
+    - Total 198 patient data
+    - Rows are patients, columns are attributes
+-  Molecular data ("HCC_Toffanin_cytobands_HIDS.tsv")  
+    - Total 811 data
+    - Rows are cytobands, columns are biospecimen (for copy number) IDs. 
+    
+
+### Step 1 - Read in Data   
+#### 1a - Read in Clinical Data
+
+```{r}
+clinical_data <- read.csv (file="input/HCC_toffanin_Clinical_Cleaned_Final.csv", 
+                             header=T, stringsAsFactors = F, row.names = 1)
+head(clinical_data[,1:4]) # 198 objects confirmed.
+colnames(clinical_data) # Column names checked.
+```
+    
+#### 1b - Read in Copy Number Data
+
+```{r}
+cytoband_data <- read.table (file="input/HCC_Toffanin_cytobands_HIDS.tsv", 
+                             sep="\t", row.names=1, header=T, stringsAsFactors = F) # 811 objects confirmed, 197 columns confirmed (1 data from clinical data missing copy number data.)
+head(cytoband_data[1:5,1:5]) 
+
+```
+
+#### Which groups to compare? 
+
+```{r}
+table(clinical_data$VASCULAR_INVASION)
+# 119 blank, 34 NO and 45 YES
+# From 45 YES group, 1 data is missing copy number data. Therefore, total 44 samples from YES group will be included. 
+# Total number of data for analysis = 34 + 44 = 78 samples 
+# 
+```
+
+
+### Step 2 - Clean/Filter Data
+
+```{r}
+# Subset only those patients profiled on copy number array
+whichPatients <- which(is.na(clinical_data$BiospecimenID_copyNumber)== FALSE)
+clinDataWithCN <- clinical_data[whichPatients, ] #197 patients that have copy number data
+
+### Filter out the patients with 'NON-TUMOR' sample type to include only cancer patients
+whichPatBlank <- which(clinDataWithCN$SAMPLE_TYPE == "NON_TUMOR_CIRRHOTIC")
+clinDataWithTumor<- clinDataWithCN[-whichPatBlank, ] 
+
+### Filter out the patients with no vascular invasion data
+whichVasBlank <- which(clinDataWithTumor$VASCULAR_INVASION == "")
+clinical_data_final<-clinDataWithTumor[-whichVasBlank, ]
+
+knitr::kable(table(clinical_data_final$VASCULAR_INVASION)) # Final data to be analyzed total 78 objects.
+```
+
+#### What are the sample identifiers ?
+* Sample identifier for clinical data: Column "BiospecimenID_copyNumber"
+* Sample identifier for copy number data: Column names 
+
+#### Filter copy number data
+```{r}
+# Find out which IDs in copy number file  match with the filtered clinical IDs
+whichIDs <- which(colnames(cytoband_data) %in% clinical_data_final$BiospecimenID_copyNumber)
+
+# These are the IDs that have VASCULAR_INVASION either YES or NO. No Blanks.
+cytoband_data_filtered <- cytoband_data[, whichIDs] # 811 features rows , 78 rows columns, meaning 78 patient samples. 
+
+knitr::kable(cytoband_data_filtered[1:5, 1:4]) 
+```
+
+
+### Step 3 - Identify the groups to be compared
+#### Identify the groups to be compared (Baseline and Comparison Grps) - Clinical Data, Copy number data
+```{r}
+# Clinical data - Baseline group = Patients that had vascular invasion
+# Save the labels (row numbers)
+baseline <-  which(clinical_data_final$VASCULAR_INVASION == "NO") 
+head(baseline)
+clinical_baseline <- clinical_data_final[baseline, ] #Subset patients - 34 patients
+
+#Clinical Data Comparison group = Patients that recurred/relapsed
+# Save the labels (row numbers)
+comparison <- which(clinical_data_final$VASCULAR_INVASION == "YES") 
+head(comparison)
+clinical_comparison <- clinical_data_final[comparison, ] #subset patients - 44 samples
+
+#### subset Copy number Data
+copynumber_baseline <- cytoband_data_filtered[, clinical_baseline$BiospecimenID_copyNumber] #34 samples
+copynumber_comparison <- cytoband_data_filtered[, clinical_comparison$BiospecimenID_copyNumber] #44 samples
+```
+
+
+### Step 4: Sanity check 
+```{r}
+clinical_baseline$BiospecimenID_copyNumber == colnames(copynumber_baseline)
+clinical_comparison$BiospecimenID_copyNumber == colnames(copynumber_comparison)
+
+# Check in files by comparison. 
+write.table(clinical_baseline$BiospecimenID_copyNumber , 
+            file = "datacheck/YoungminChoi_ClinBaseIDs.tsv", sep="\t", quote = F  )
+write.table(clinical_comparison$BiospecimenID_copyNumber , 
+            file = "datacheck/YoungminChoi_ClinCompIDs.tsv", sep="\t", quote = F  )
+write.table(colnames(copynumber_baseline) , 
+            file = "datacheck/YoungminChoi_CopyNumBaseIDs.tsv", sep="\t", quote = F  )
+write.table(colnames(copynumber_comparison) , 
+            file = "datacheck/YoungminChoi_CopyNumCompIDs.tsv", sep="\t", quote = F  )
+
+#Export the column names from gene expression data  
+#Open this file and check that it contains only probe/gene names and no other garbage
+write.table(row.names(cytoband_data_filtered),file = "datacheck/YoungminChoi_FeatureIDs.tsv", sep="\t", quote = F  )
+
+```
+
+
+### Step 5: Prep data for T-test
+
+```{r}
+### Checking to make sure data is a numeric data frame
+knitr::kable(head(copynumber_baseline[1:5,1:4]))
+knitr::kable(head(copynumber_comparison[1:5,1:4]))
+```
+
+
+#### Function for T-test
+
+```{r ttest}
+source("fnTTest_CopyNumber.R") 
+
+#### Call T-test function
+results1 = fnTTest_CopyNumber(
+    baseGroup = copynumber_baseline,  #baseline group object
+    compGroup = copynumber_comparison,  #comparison group object
+    toolN = "20220927_",      #Name of Test
+    baseGroupName = "Recur-No",    #Name of baseline group RecurrenceNo
+    compGroupName =  "Recur-Yes",   #Name of Comp group RecurrentYes
+    folderName = "output")     #output folder name
+
+
+
+```
+
+
+#### Subset top differentiately changed cytobands
+
+```{r}
+ttestResults <- read.csv("output/20220927__Recur-Yes_(Comp).vs._Recur-No_(Base).TTest.csv")
+
+#check to make sure p-value column is imported as numeric 
+#sort by p-value (just in case the results are not sorted by p-value)
+ttestResultsSorted <- dplyr::arrange(ttestResults, Pvalue)
+#Export p-value sorted results
+write.csv(x = ttestResultsSorted, file = "output/YoungminChoi-TTestHW-06-Output.csv")
+
+#short list feature with p-value < 0.05
+whichTop <- which(as.numeric(ttestResultsSorted$Pvalue) < 0.05) 
+topResults <- ttestResultsSorted[whichTop, ] #62 cytobands
+topCytobandFeatures <- topResults$Feature
+
+head(topCytobandFeatures)
+
+length(topCytobandFeatures)
+
+#Export significant cytoband features
+write.csv(x = topCytobandFeatures, file = "output/YoungminChoi_TopFeatures.csv")
+```
+
+
+### Data Visualization 
+
+#### Get genomic location of the top cytobans
+```{r}
+source("fnGetCytobandLocation.R")
+cytobandLocationFinal <- fnGetCytobandLocation(topCytobandFeatures)
+```
+
+#### Call function to plot cytobans in a circos plot 
+```{r}
+#source the R file with the function
+source("fnCircosCytoband.R")
+
+#calling function
+fnCircosCytoband(filename2 = "output/YoungminChoi_Circos.pdf",
+                 cytobandLocationFinal) 
+```
+
+## III. Data Analysis Summary
+
+- Which are the top 3 chromosomes that have the most affected cytoband regions?  
+    + Chromosomes 10, 12 and 21. 
+- How many chromosomes are affected overall? 
+    + Total 6 chromosomes (chromosomes 1, 4, 10, 11,12, and 21).  
+
+
